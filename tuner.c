@@ -47,7 +47,8 @@ cSatipTuner::cSatipTuner(cSatipDeviceIf &deviceP, unsigned int packetLenP)
   pmtPidM(-1),
   addPidsM(),
   delPidsM(),
-  pidsM()
+  pidsM(),
+  packetProcM(this)
 {
   debug1("%s (, %d) [device %d]", __PRETTY_FUNCTION__, packetLenP, deviceIdM);
 
@@ -70,15 +71,17 @@ cSatipTuner::cSatipTuner(cSatipDeviceIf &deviceP, unsigned int packetLenP)
   cSatipPoller::GetInstance()->Register(rtpM);
   cSatipPoller::GetInstance()->Register(rtcpM);
 
-  // Start thread
+  // Start threads
   Start();
+  packetProcM.Start();
 }
 
 cSatipTuner::~cSatipTuner()
 {
   debug1("%s [device %d]", __PRETTY_FUNCTION__, deviceIdM);
 
-  // Stop thread
+  // Stop threads
+  packetProcM.Stop();
   sleepM.Signal();
   if (Running())
      Cancel(3);
@@ -92,6 +95,8 @@ cSatipTuner::~cSatipTuner()
   cSatipPoller::GetInstance()->Unregister(rtpM);
   rtcpM.Close();
   rtpM.Close();
+
+  ClearQueue();
 }
 
 void cSatipTuner::Action(void)
@@ -229,6 +234,7 @@ bool cSatipTuner::Connect(void)
         // Flush any old content
         //rtpM.Flush();
         //rtcpM.Flush();
+	packetProcM.Reset();
         if (rtspM.Setup(*uri, rtpM.Port(), rtcpM.Port(), useTcp)) {
            keepAliveM.Set(timeoutM);
            if (nextServerM.IsValid()) {
@@ -272,6 +278,8 @@ bool cSatipTuner::Disconnect(void)
   pmtPidM = -1;
   addPidsM.Clear();
   delPidsM.Clear();
+
+  ClearQueue();
 
   // return always true
   return true;
@@ -690,4 +698,152 @@ cString cSatipTuner::GetInformation(void)
 {
   debug16("%s [device %d]", __PRETTY_FUNCTION__, deviceIdM);
   return (currentStateM >= tsTuned) ? cString::sprintf("%s?%s (%s) [stream=%d]", *GetBaseUrl(*streamAddrM, streamPortM), *streamParamM, *rtspM.GetActiveMode(), streamIdM) : "connection failed";
+}
+
+void cSatipTuner::EnqueueRtpPacket(u_char* d, size_t l)
+{
+  cMutexLock MutexLock(&mutexM);
+  cSatipRtpPacket* p = new cSatipRtpPacket(d, l);
+  this->rtpPacketsM.push_back(p);
+}
+
+cSatipRtpPacket* cSatipTuner::DequeueOldestRtpPacket()
+{
+  cMutexLock MutexLock(&mutexM);
+
+  std::list<cSatipRtpPacket*>::iterator it = this->rtpPacketsM.begin();
+  
+  if (it == this->rtpPacketsM.end())
+     return 0;
+ 
+  std::list<cSatipRtpPacket*>::iterator oldest = it;
+  ushort minSeq = (*oldest)->SequenceNumber(); 
+
+  for (; it != this->rtpPacketsM.end(); ++it) {
+    cSatipRtpPacket* cur = *it;
+
+    if (cur->SequenceNumber() < minSeq) {
+       oldest = it;
+       minSeq = cur->SequenceNumber();
+    }
+  }
+
+  cSatipRtpPacket* result = *oldest;
+  this->rtpPacketsM.erase(oldest);
+
+  return result;
+}
+
+cSatipRtpPacket* cSatipTuner::DequeueRtpPacket(ushort cseq)
+{
+  cMutexLock MutexLock(&mutexM);
+  
+  std::list<cSatipRtpPacket*> missedPackets;
+  std::list<cSatipRtpPacket*>::iterator it = this->rtpPacketsM.begin();
+  
+  cSatipRtpPacket* result = 0;
+  for (; it != this->rtpPacketsM.end(); ) {
+    cSatipRtpPacket* cur = *it;
+
+    if (cur->SequenceNumber() < cseq) {
+       missedPackets.push_back(cur);
+       this->rtpPacketsM.erase(it++);
+       continue;
+    }
+    if (cur->SequenceNumber() == cseq) {
+       result = cur;
+       this->rtpPacketsM.erase(it);
+       break;
+    }
+    
+    ++it;
+  }
+
+  it = missedPackets.begin();
+  for (; it != missedPackets.end(); ++it)
+    delete *it;
+
+  return result;
+}
+
+void cSatipTuner::ClearQueue(void)
+{
+  cMutexLock MutexLock(&mutexM);
+
+  std::list<cSatipRtpPacket*>::iterator it = this->rtpPacketsM.begin();
+  for (; it != this->rtpPacketsM.end(); ++it)
+    delete *it;
+  this->rtpPacketsM.clear();
+}
+
+size_t cSatipTuner::QueueSize(void)
+{
+  cMutexLock MutexLock(&mutexM);
+  return this->rtpPacketsM.size();
+}
+
+cSatipRtpPacketProcessor::cSatipRtpPacketProcessor(cSatipTuner* t)
+: cThread(cString::sprintf("SATIP#%d tuner processor", t->GetId())), tunerM(t)
+{
+  resetM = false;
+}
+
+void cSatipRtpPacketProcessor::Action(void)
+{
+  ushort seq = 0;
+  bool possiblePacketLoss = false;
+  cSatipRtpPacket* next = 0;
+  
+  Reset();
+
+  while(Running()) {
+     if (next) {
+        if (next->Valid() && next->PayloadType() == 33) {
+           if (possiblePacketLoss) {
+              possiblePacketLoss = false;
+
+              if (next->SequenceNumber() != seq) {
+                 error ("SATIP#%d: missed RTP packet %d.", this->tunerM->GetId(), seq);
+                 seq = next->SequenceNumber();
+              }
+           }
+	
+           this->tunerM->ProcessVideoData(next->Data(), next->DataLength());
+           ++seq;
+        }
+        else {
+           if (next->DataLength() == 0)
+              debug7 ("SATIP#%d: packet %d is empty.", this->tunerM->GetId(), next->SequenceNumber());
+           if (next->Version() != 2)
+             debug7 ("SATIP#%d: packet %d has unsupported version %d.", this->tunerM->GetId(), next->SequenceNumber(), next->Version());
+           if (next->PayloadType() != 33)
+             debug7 ("SATIP#%d: packet %d has unsupported payload type %d.", this->tunerM->GetId(), next->SequenceNumber(), next->PayloadType());
+           if (next->DataLength() % TS_SIZE != 0)
+              debug7 ("SATIP#%d: packet %d has invalid length %u.", this->tunerM->GetId(), next->SequenceNumber(), next->DataLength());
+        }
+
+        delete next;
+        next = 0;
+     }
+    
+     if (resetM) {
+        resetM = false;
+        while ((next = this->tunerM->DequeueOldestRtpPacket()) == 0)
+           cCondWait::SleepMs(3);
+     }
+     else {
+        cTimeMs timer(40);
+        while (((next = this->tunerM->DequeueRtpPacket(seq)) == 0) && !timer.TimedOut())
+           cCondWait::SleepMs(3);
+
+        if (!next) {
+           possiblePacketLoss = true;
+           Reset();
+        }
+     }
+  }
+
+  if (next)
+     delete next;
+  next = 0;
 }

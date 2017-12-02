@@ -8,6 +8,10 @@
 #ifndef __SATIP_TUNERIF_H
 #define __SATIP_TUNERIF_H
 
+#include <string>
+
+class cSatipRtpPacket;
+
 class cSatipTunerIf {
 public:
   cSatipTunerIf() {}
@@ -20,6 +24,11 @@ public:
   virtual void SetSessionTimeout(const char *sessionP, int timeoutP) = 0;
   virtual void SetupTransport(int rtpPortP, int rtcpPortP, const char *streamAddrP, const char *sourceAddrP) = 0;
   virtual int GetId(void) = 0;
+  virtual void EnqueueRtpPacket(u_char* d, size_t l) = 0;
+  virtual cSatipRtpPacket* DequeueRtpPacket(ushort cseq) = 0;
+  virtual cSatipRtpPacket* DequeueOldestRtpPacket() = 0;
+  virtual void ClearQueue(void) = 0;
+  virtual size_t QueueSize(void) = 0;
 
 private:
   explicit cSatipTunerIf(const cSatipTunerIf&);

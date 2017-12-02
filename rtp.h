@@ -12,6 +12,35 @@
 #include "tunerif.h"
 #include "pollerif.h"
 
+class cSatipRtpPacket
+{
+private:
+  u_char* headerM;
+  u_char* dataM;
+  size_t hlenM;
+  size_t dlenM;
+  ushort seqNumM;
+  uchar versionM;
+  uchar ptM;
+  
+  cSatipRtpPacket();
+
+public:
+  cSatipRtpPacket(u_char* d, size_t l);
+  ~cSatipRtpPacket();
+
+  inline size_t HeaderLength(void) const { return hlenM; }
+  inline size_t DataLength(void) const { return dlenM; }
+  inline ushort SequenceNumber(void) const { return seqNumM; }
+  inline uchar Version(void) const { return versionM; }
+  inline uchar PayloadType(void) const { return ptM; }
+
+  inline uchar* Header(void) { return headerM; }
+  inline uchar* Data(void) { return dataM; }
+
+  bool Valid(void) const;
+};
+
 class cSatipRtp : public cSatipSocket, public cSatipPollerIf {
 private:
   enum {

@@ -7,11 +7,98 @@
 
 #define __STDC_FORMAT_MACROS // Required for format specifiers
 #include <inttypes.h>
+#include <cstring>
 
 #include "config.h"
 #include "common.h"
 #include "log.h"
 #include "rtp.h"
+
+cSatipRtpPacket::cSatipRtpPacket()
+{
+  headerM = dataM = 0;
+  hlenM = dlenM = 0;
+  seqNumM = 0;
+  versionM = 2;
+  ptM = 0;
+}
+
+cSatipRtpPacket::cSatipRtpPacket(u_char* d, size_t l)
+{
+  headerM = dataM = 0;
+  hlenM = dlenM = 0;
+  seqNumM = 0;
+  versionM = 2;
+  ptM = 0;
+
+  if (l > 0 && (d[0] == TS_SYNC_BYTE)) {
+     dlenM = 1;
+     dataM = new u_char[1];
+     dataM[0] = TS_SYNC_BYTE;
+  }
+  else if (l > 3) {
+     // http://tools.ietf.org/html/rfc3550
+     // http://tools.ietf.org/html/rfc2250
+     // Version
+     versionM = (d[0] >> 6) & 0x03;
+     // Extension bit
+     unsigned int x = (d[0] >> 4) & 0x01;
+     // CSCR count
+     unsigned int cc = d[0] & 0x0F;
+     // Payload type: MPEG2 TS = 33
+     ptM = d[1] & 0x7F;
+     if (ptM == 33) {
+        // Sequence number
+        seqNumM = ((d[2] & 0xFF) << 8) | (d[3] & 0xFF);
+
+        // Header length
+        hlenM = (3 + cc) * (unsigned int)sizeof(uint32_t);
+        // Check if extension
+        if (x) {
+           // Extension header length
+          unsigned int ehl = (((d[hlenM + 2] & 0xFF) << 8) | (d[hlenM + 3] & 0xFF));
+          // Update header length
+          hlenM += (ehl + 1) * (unsigned int)sizeof(uint32_t);
+        }
+
+        headerM = new u_char[hlenM];
+        std::memcpy(headerM, d, hlenM);
+
+        dlenM = l - hlenM;
+
+        if (dlenM > 0) {
+           dataM = new u_char[dlenM];
+           std::memcpy(dataM, d + hlenM, dlenM);
+        }
+     }
+  }
+}
+
+cSatipRtpPacket::~cSatipRtpPacket()
+{
+  if (headerM) {
+     delete headerM;
+     headerM = 0;
+  }
+  if (dataM) {
+     delete dataM;
+     dataM = 0;
+  }
+}
+
+bool cSatipRtpPacket::Valid(void) const
+{
+  if (dlenM == 0 || versionM != 2)
+     return false;
+
+  if (dataM[0] == TS_SYNC_BYTE)
+     return true;
+
+  if ((ptM != 33) || ((dlenM % TS_SIZE) != 0))
+     return false;
+
+  return true;
+}
 
 cSatipRtp::cSatipRtp(cSatipTunerIf &tunerP)
 : cSatipSocket(SatipConfig.GetRtpRcvBufSize()),
@@ -52,111 +139,29 @@ void cSatipRtp::Close(void)
      }
 }
 
-int cSatipRtp::GetHeaderLength(unsigned char *bufferP, unsigned int lengthP)
-{
-  debug16("%s (, %d) [device %d]", __PRETTY_FUNCTION__, lengthP, tunerM.GetId());
-  unsigned int headerlen = 0;
-
-  if (lengthP > 0) {
-     if (bufferP[0] == TS_SYNC_BYTE)
-        return headerlen;
-     else if (lengthP > 3) {
-        // http://tools.ietf.org/html/rfc3550
-        // http://tools.ietf.org/html/rfc2250
-        // Version
-        unsigned int v = (bufferP[0] >> 6) & 0x03;
-        // Extension bit
-        unsigned int x = (bufferP[0] >> 4) & 0x01;
-        // CSCR count
-        unsigned int cc = bufferP[0] & 0x0F;
-        // Payload type: MPEG2 TS = 33
-        unsigned int pt = bufferP[1] & 0x7F;
-        if (pt != 33)
-           debug7("%s (%d) Received invalid RTP payload type %d - v=%d [device %d]",
-                    __PRETTY_FUNCTION__, lengthP, pt, v, tunerM.GetId());
-        // Sequence number
-        int seq = ((bufferP[2] & 0xFF) << 8) | (bufferP[3] & 0xFF);
-        if ((((sequenceNumberM + 1) % 0xFFFF) == 0) && (seq == 0xFFFF))
-           sequenceNumberM = -1;
-        else if ((sequenceNumberM >= 0) && (((sequenceNumberM + 1) % 0xFFFF) != seq)) {
-           packetErrorsM++;
-           if (time(NULL) - lastErrorReportM > eReportIntervalS) {
-              info("Detected %d RTP packet error%s [device %d]", packetErrorsM, packetErrorsM == 1 ? "": "s", tunerM.GetId());
-              packetErrorsM = 0;
-              lastErrorReportM = time(NULL);
-              }
-           sequenceNumberM = seq;
-           }
-        else
-           sequenceNumberM = seq;
-        // Header length
-        headerlen = (3 + cc) * (unsigned int)sizeof(uint32_t);
-        // Check if extension
-        if (x) {
-           // Extension header length
-           unsigned int ehl = (((bufferP[headerlen + 2] & 0xFF) << 8) | (bufferP[headerlen + 3] & 0xFF));
-           // Update header length
-           headerlen += (ehl + 1) * (unsigned int)sizeof(uint32_t);
-           }
-        // Check for empty payload
-        if (lengthP == headerlen) {
-           debug7("%s (%d) Received empty RTP packet #%d [device %d]", __PRETTY_FUNCTION__, lengthP, seq, tunerM.GetId());
-           headerlen = -1;
-           }
-        // Check that rtp is version 2 and payload contains multiple of TS packet data
-        else if ((v != 2) || (((lengthP - headerlen) % TS_SIZE) != 0) || (bufferP[headerlen] != TS_SYNC_BYTE)) {
-           debug7("%s (%d) Received incorrect RTP packet #%d v=%d len=%d sync=0x%02X [device %d]", __PRETTY_FUNCTION__,
-                   lengthP, seq, v, headerlen, bufferP[headerlen], tunerM.GetId());
-           headerlen = -1;
-           }
-        else
-           debug7("%s (%d) Received RTP packet #%d v=%d len=%d sync=0x%02X [device %d]", __PRETTY_FUNCTION__,
-                   lengthP, seq, v, headerlen, bufferP[headerlen], tunerM.GetId());
-        }
-     }
-
-  return headerlen;
-}
-
 void cSatipRtp::Process(void)
 {
   debug16("%s [device %d]", __PRETTY_FUNCTION__, tunerM.GetId());
   if (bufferM) {
      unsigned int lenMsg[eRtpPacketReadCount];
-     uint64_t elapsed;
      int count = 0;
-     cTimeMs processing(0);
 
      do {
-       count = ReadMulti(bufferM, lenMsg, eRtpPacketReadCount, eMaxUdpPacketSizeB);
-       for (int i = 0; i < count; ++i) {
+        count = ReadMulti(bufferM, lenMsg, eRtpPacketReadCount, eMaxUdpPacketSizeB);
+        for (int i = 0; i < count; ++i) {
            unsigned char *p = &bufferM[i * eMaxUdpPacketSizeB];
-           int headerlen = GetHeaderLength(p, lenMsg[i]);
-           if ((headerlen >= 0) && (headerlen < (int)lenMsg[i]))
-              tunerM.ProcessVideoData(p + headerlen, lenMsg[i] - headerlen);
-           }
-       } while (count >= eRtpPacketReadCount);
-
-     elapsed = processing.Elapsed();
-     if (elapsed > 1)
-        debug6("%s %d read(s) took %" PRIu64 " ms [device %d]", __PRETTY_FUNCTION__, count, elapsed, tunerM.GetId());
-     }
+           tunerM.EnqueueRtpPacket(p, lenMsg[i]);
+        }
+     } while (count >= eRtpPacketReadCount);
+  }
 }
 
 void cSatipRtp::Process(unsigned char *dataP, int lengthP)
 {
   debug16("%s [device %d]", __PRETTY_FUNCTION__, tunerM.GetId());
   if (dataP && lengthP > 0) {
-     uint64_t elapsed;
-     cTimeMs processing(0);
-     int headerlen = GetHeaderLength(dataP, lengthP);
-     if ((headerlen >= 0) && (headerlen < lengthP))
-        tunerM.ProcessVideoData(dataP + headerlen, lengthP - headerlen);
-
-     elapsed = processing.Elapsed();
-     if (elapsed > 1)
-        debug6("%s %d read(s) took %" PRIu64 " ms [device %d]", __PRETTY_FUNCTION__, lengthP, elapsed, tunerM.GetId());
-     }
+     tunerM.EnqueueRtpPacket(dataP, lengthP);
+  }
 }
 
 cString cSatipRtp::ToString(void) const

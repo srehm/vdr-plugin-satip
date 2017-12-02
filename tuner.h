@@ -10,6 +10,8 @@
 
 #include <vdr/thread.h>
 #include <vdr/tools.h>
+#include <list>
+#include <string>
 
 #include "deviceif.h"
 #include "discover.h"
@@ -74,6 +76,23 @@ public:
   cString GetInfo(void) { return cString::sprintf("server=%s deviceid=%d transponder=%d", serverM ? "assigned" : "null", deviceIdM, transponderM); }
 };
 
+class cSatipTuner;
+
+class cSatipRtpPacketProcessor : public cThread
+{
+private:
+  cSatipTuner* tunerM;
+  bool resetM;
+
+public:
+  cSatipRtpPacketProcessor(cSatipTuner* t); 
+
+  virtual void Action(void);
+  
+  inline void Reset(void) { resetM = true; }
+  inline void Stop(void) { Cancel(5); }
+};
+
 class cSatipTuner : public cThread, public cSatipTunerStatistics, public cSatipTunerIf
 {
 private:
@@ -123,6 +142,8 @@ private:
   cSatipPid addPidsM;
   cSatipPid delPidsM;
   cSatipPid pidsM;
+  cSatipRtpPacketProcessor packetProcM;
+  std::list<cSatipRtpPacket*> rtpPacketsM;
 
   bool Connect(void);
   bool Disconnect(void);
@@ -164,6 +185,11 @@ public:
   virtual void SetSessionTimeout(const char *sessionP, int timeoutP);
   virtual void SetupTransport(int rtpPortP, int rtcpPortP, const char *streamAddrP, const char *sourceAddrP);
   virtual int GetId(void);
+  virtual void EnqueueRtpPacket(u_char* d, size_t l);
+  virtual cSatipRtpPacket* DequeueRtpPacket(ushort cseq);
+  virtual cSatipRtpPacket* DequeueOldestRtpPacket();
+  virtual void ClearQueue(void);
+  virtual size_t QueueSize(void);
 };
 
 #endif // __SATIP_TUNER_H
