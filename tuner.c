@@ -234,7 +234,9 @@ bool cSatipTuner::Connect(void)
         // Flush any old content
         //rtpM.Flush();
         //rtcpM.Flush();
-	packetProcM.Reset();
+        packetProcM.Reset();
+        if (useTcp)
+           debug1("%s Requesting TCP [device %d]", __PRETTY_FUNCTION__, deviceIdM);
         if (rtspM.Setup(*uri, rtpM.Port(), rtcpM.Port(), useTcp)) {
            keepAliveM.Set(timeoutM);
            if (nextServerM.IsValid()) {
@@ -394,8 +396,8 @@ void cSatipTuner::SetupTransport(int rtpPortP, int rtcpPortP, const char *stream
   // Adapt RTP to any transport media change
   if (multicast != rtpM.IsMulticast() || rtpPortP != rtpM.Port()) {
      cSatipPoller::GetInstance()->Unregister(rtpM);
-     rtpM.Close();
      if (rtpPortP >= 0) {
+        rtpM.Close();
         if (multicast)
            rtpM.OpenMulticast(rtpPortP, streamAddrP, sourceAddrP);
         else
@@ -406,12 +408,12 @@ void cSatipTuner::SetupTransport(int rtpPortP, int rtcpPortP, const char *stream
   // Adapt RTCP to any transport media change
   if (multicast != rtcpM.IsMulticast() || rtcpPortP != rtcpM.Port()) {
      cSatipPoller::GetInstance()->Unregister(rtcpM);
-     rtcpM.Close();
      if (rtcpPortP >= 0) {
+        rtcpM.Close();
         if (multicast)
-           rtcpM.OpenMulticast(rtpPortP, streamAddrP, sourceAddrP);
+           rtcpM.OpenMulticast(rtcpPortP, streamAddrP, sourceAddrP);
         else
-           rtcpM.Open(rtpPortP);
+           rtcpM.Open(rtcpPortP);
         cSatipPoller::GetInstance()->Register(rtcpM);
         }
      }
@@ -712,12 +714,12 @@ cSatipRtpPacket* cSatipTuner::DequeueOldestRtpPacket()
   cMutexLock MutexLock(&mutexM);
 
   std::list<cSatipRtpPacket*>::iterator it = this->rtpPacketsM.begin();
-  
+
   if (it == this->rtpPacketsM.end())
      return 0;
- 
+
   std::list<cSatipRtpPacket*>::iterator oldest = it;
-  ushort minSeq = (*oldest)->SequenceNumber(); 
+  ushort minSeq = (*oldest)->SequenceNumber();
 
   for (; it != this->rtpPacketsM.end(); ++it) {
     cSatipRtpPacket* cur = *it;
@@ -737,10 +739,10 @@ cSatipRtpPacket* cSatipTuner::DequeueOldestRtpPacket()
 cSatipRtpPacket* cSatipTuner::DequeueRtpPacket(ushort cseq)
 {
   cMutexLock MutexLock(&mutexM);
-  
+
   std::list<cSatipRtpPacket*> missedPackets;
   std::list<cSatipRtpPacket*>::iterator it = this->rtpPacketsM.begin();
-  
+
   cSatipRtpPacket* result = 0;
   for (; it != this->rtpPacketsM.end(); ) {
     cSatipRtpPacket* cur = *it;
@@ -755,7 +757,7 @@ cSatipRtpPacket* cSatipTuner::DequeueRtpPacket(ushort cseq)
        this->rtpPacketsM.erase(it);
        break;
     }
-    
+
     ++it;
   }
 
@@ -793,7 +795,7 @@ void cSatipRtpPacketProcessor::Action(void)
   ushort seq = 0;
   bool possiblePacketLoss = false;
   cSatipRtpPacket* next = 0;
-  
+
   Reset();
 
   while(Running()) {
@@ -807,7 +809,7 @@ void cSatipRtpPacketProcessor::Action(void)
                  seq = next->SequenceNumber();
               }
            }
-	
+
            this->tunerM->ProcessVideoData(next->Data(), next->DataLength());
            ++seq;
         }
@@ -825,7 +827,7 @@ void cSatipRtpPacketProcessor::Action(void)
         delete next;
         next = 0;
      }
-    
+
      if (resetM) {
         resetM = false;
         while ((next = this->tunerM->DequeueOldestRtpPacket()) == 0)
